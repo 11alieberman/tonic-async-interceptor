@@ -5,7 +5,6 @@
 use bytes::Bytes;
 use http::{Extensions, Method, Uri, Version};
 use http_body::Body;
-use http_body_util::BodyExt;
 use pin_project::pin_project;
 use std::{
     fmt,
@@ -14,8 +13,9 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use tonic::body::Body as TonicBody;
 use tonic::metadata::MetadataMap;
-use tonic::{body::BoxBody, Request, Status};
+use tonic::{Request, Status};
 use tower_layer::Layer;
 use tower_service::Service;
 
@@ -98,16 +98,6 @@ where
     fn layer(&self, service: S) -> Self::Service {
         AsyncInterceptedService::new(service, self.f.clone())
     }
-}
-
-/// Convert a [`http_body::Body`] into a [`BoxBody`].
-fn boxed<B>(body: B) -> BoxBody
-where
-    B: Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Error>,
-{
-    body.map_err(|e| Status::from_error(e.into()))
-        .boxed_unsync()
 }
 
 // Components and attributes of a request, without metadata or extensions.
@@ -239,7 +229,7 @@ where
     ResBody: Default + Body<Data = Bytes> + Send + 'static,
     ResBody::Error: Into<Error>,
 {
-    type Response = http::Response<BoxBody>;
+    type Response = http::Response<TonicBody>;
     type Error = S::Error;
     type Future = AsyncResponseFuture<S, F::Future, ReqBody>;
 
@@ -303,20 +293,15 @@ where
     B: Default + Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Error>,
 {
-    type Output = Result<http::Response<BoxBody>, E>;
+    type Output = Result<http::Response<TonicBody>, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.project().kind.project() {
             KindProj::Future(future) => future
                 .poll(cx)
-                .map(|result| result.map(|res| res.map(boxed))),
+                .map(|result| result.map(|resp| resp.map(TonicBody::new))),
             KindProj::Status(status) => {
-                let response = status
-                    .take()
-                    .unwrap()
-                    .into_http()
-                    .map(|_| B::default())
-                    .map(boxed);
+                let response = status.take().unwrap().into_http();
                 Poll::Ready(Ok(response))
             }
         }
@@ -409,7 +394,7 @@ where
     ResBody: Default + Body<Data = Bytes> + Send + 'static,
     ResBody::Error: Into<Error>,
 {
-    type Output = Result<http::Response<BoxBody>, S::Error>;
+    type Output = Result<http::Response<TonicBody>, S::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -547,7 +532,7 @@ mod tests {
     #[tokio::test]
     async fn handles_intercepted_status_as_response() {
         let message = "Blocked by the interceptor";
-        let expected = Status::permission_denied(message).into_http();
+        let expected = Status::permission_denied(message).into_http::<TonicBody>();
 
         let layer = async_interceptor(|_: Request<()>| {
             future::ready(Err(Status::permission_denied(message)))
