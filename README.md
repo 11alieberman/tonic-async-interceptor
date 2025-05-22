@@ -48,7 +48,7 @@ struct UserContext {
 }
 
 // Async interceptor fn
-async fn authenticate(req: Request<()>) -> Result<Request<()>, Status> {
+async fn authenticate(mut req: Request<()>) -> Result<Request<()>, Status> {
     // Inspect the gRPC metadata.
     let auth_header_val = match req.metadata().get("x-my-auth-header") {
         Some(val) => val,
